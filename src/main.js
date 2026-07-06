@@ -47,10 +47,57 @@ function renderNotes(notes) {
       // textContent-style escaping via a detached element keeps user content safe.
       const body = document.createElement('div')
       body.textContent = note.content ?? ''
-      return `<li class="note"><p>${body.innerHTML}</p><time>${time}</time></li>`
+      return `<li class="note" data-id="${note.id}">
+        <p>${body.innerHTML}</p>
+        <div class="note-footer">
+          <time>${time}</time>
+          <button type="button" class="share-btn" data-id="${note.id}">Share via email</button>
+        </div>
+      </li>`
     })
     .join('')
 }
+
+// Share a note by email. The RESEND_API_KEY never touches the browser — this
+// posts to the server-side function at /api/share-note, which does the sending.
+async function shareNote(noteId, button) {
+  const to = window.prompt('Send this note to which email address?')
+  if (to === null) return // user cancelled
+  const recipient = to.trim()
+  if (!recipient) {
+    setStatus('No email address entered.', 'error')
+    return
+  }
+
+  button.disabled = true
+  const original = button.textContent
+  button.textContent = 'Sending…'
+  setStatus(`Sending note to ${recipient}…`)
+  try {
+    const response = await fetch('/api/share-note', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: recipient, noteId }),
+    })
+    const result = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      throw new Error(result.error || `Request failed (${response.status})`)
+    }
+    setStatus(`Note sent to ${recipient}.`, 'success')
+  } catch (error) {
+    setStatus(`Could not send: ${error.message}`, 'error')
+  } finally {
+    button.disabled = false
+    button.textContent = original
+  }
+}
+
+// Event delegation: one listener handles the Share button on every note.
+notesList.addEventListener('click', (event) => {
+  const button = event.target.closest('.share-btn')
+  if (!button) return
+  shareNote(button.dataset.id, button)
+})
 
 async function loadNotes() {
   const { data, error } = await supabase
