@@ -3,9 +3,36 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Hello from Pioneer Species</title>
+    <title>Hello from Pioneer Species — Notes</title>
   </head>
   <body>
-    <h1>hello from Pioneer Species</h1>
+    <main id="app">
+      <header>
+        <h1>hello from Pioneer Species</h1>
+        <p class="subtitle">A shared, public note wall. Anyone can read and post.</p>
+      </header>
+
+      <form id="note-form" autocomplete="off">
+        <label class="visually-hidden" for="note-input">New note</label>
+        <textarea
+          id="note-input"
+          name="note"
+          rows="4"
+          maxlength="2000"
+          placeholder="Write a note and share it with everyone…"
+          required
+        ></textarea>
+        <div class="form-row">
+          <button id="submit-btn" type="submit">Post note</button>
+          <span id="status" role="status" aria-live="polite"></span>
+        </div>
+      </form>
+
+      <section aria-labelledby="notes-heading">
+        <h2 id="notes-heading">Latest notes</h2>
+        <ul id="notes"></ul>
+      </section>
+    </main>
+    <script type="module" src="/src/main.js"></script>
   </body>
 </html>
