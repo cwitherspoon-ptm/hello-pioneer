@@ -30,10 +30,88 @@ if (!supabaseUrl || !supabaseAnonKey) {
 
 const supabase = createClient(supabaseUrl, supabaseAnonKey)
 
+// The notes currently on the wall, and their email activity keyed by note id.
+// Both are kept in memory so realtime inserts can re-render without a refetch.
+let notesCache = []
+let eventsByNote = new Map()
+
 function formatTimestamp(value) {
   if (!value) return ''
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleString()
+}
+
+// Escape arbitrary strings for safe interpolation into innerHTML.
+function escapeHtml(value) {
+  const el = document.createElement('div')
+  el.textContent = value ?? ''
+  return el.innerHTML
+}
+
+// Friendly, short labels for the raw event_type values stored in email_events.
+const STATUS_LABELS = {
+  sent: 'Sent',
+  'email.delivered': 'Delivered',
+  'email.opened': 'Opened',
+  'email.clicked': 'Clicked',
+  'email.bounced': 'Bounced',
+}
+
+// Group statuses into a handful of visual kinds for the status badge colour.
+function statusKind(type) {
+  if (type === 'email.bounced') return 'bounced'
+  if (type === 'email.opened' || type === 'email.clicked') return 'engaged'
+  if (type === 'email.delivered') return 'delivered'
+  return 'sent'
+}
+
+// Compact relative time, e.g. "just now", "3m ago", "2h ago", "5d ago".
+function formatRelative(value) {
+  const then = new Date(value).getTime()
+  if (Number.isNaN(then)) return ''
+  const seconds = Math.round((Date.now() - then) / 1000)
+  if (seconds < 45) return 'just now'
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.round(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.round(hours / 24)
+  if (days < 30) return `${days}d ago`
+  const months = Math.round(days / 30)
+  if (months < 12) return `${months}mo ago`
+  return `${Math.round(months / 12)}y ago`
+}
+
+// Build the small activity feed for one note: every recipient and the latest
+// status seen for them, newest recipient first.
+function renderActivity(noteId) {
+  const events = eventsByNote.get(noteId)
+  if (!events || events.length === 0) return ''
+
+  const latestByRecipient = new Map()
+  for (const event of events) {
+    const current = latestByRecipient.get(event.recipient)
+    if (!current || new Date(event.created_at) >= new Date(current.created_at)) {
+      latestByRecipient.set(event.recipient, event)
+    }
+  }
+
+  const items = [...latestByRecipient.values()]
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+    .map(
+      (event) => `<li class="activity-item">
+          <span class="activity-recipient">${escapeHtml(event.recipient)}</span>
+          <span class="activity-status" data-kind="${statusKind(event.event_type)}">${escapeHtml(
+        STATUS_LABELS[event.event_type] ?? event.event_type
+      )}</span>
+          <time class="activity-time" datetime="${escapeHtml(event.created_at)}">${escapeHtml(
+        formatRelative(event.created_at)
+      )}</time>
+        </li>`
+    )
+    .join('')
+
+  return `<ul class="activity" aria-label="Email activity">${items}</ul>`
 }
 
 function renderNotes(notes) {
@@ -53,6 +131,7 @@ function renderNotes(notes) {
           <time>${time}</time>
           <button type="button" class="share-btn" data-id="${note.id}">Share via email</button>
         </div>
+        ${renderActivity(note.id)}
       </li>`
     })
     .join('')
@@ -99,6 +178,29 @@ notesList.addEventListener('click', (event) => {
   shareNote(button.dataset.id, button)
 })
 
+// Load the email activity for the given notes into `eventsByNote`.
+async function loadEvents(noteIds) {
+  eventsByNote = new Map()
+  if (noteIds.length === 0) return
+
+  const { data, error } = await supabase
+    .from('email_events')
+    .select('note_id, recipient, event_type, created_at')
+    .in('note_id', noteIds)
+    .order('created_at', { ascending: true })
+
+  if (error) {
+    console.error('Could not load email activity:', error.message)
+    return
+  }
+  for (const event of data) {
+    if (!event.note_id) continue
+    const list = eventsByNote.get(event.note_id) ?? []
+    list.push(event)
+    eventsByNote.set(event.note_id, list)
+  }
+}
+
 async function loadNotes() {
   const { data, error } = await supabase
     .from('notes')
@@ -110,8 +212,36 @@ async function loadNotes() {
     notesList.innerHTML = `<li class="empty">Could not load notes: ${error.message}</li>`
     return
   }
-  renderNotes(data)
+  notesCache = data ?? []
+  await loadEvents(notesCache.map((note) => note.id))
+  renderNotes(notesCache)
 }
+
+// Live updates: append incoming events and re-render the wall. Resend webhooks
+// insert rows server-side, so this reflects delivered/opened/clicked/bounced
+// without a page refresh. Events for notes not currently shown are ignored.
+function handleIncomingEvent(row) {
+  if (!row || !row.note_id) return
+  if (!notesCache.some((note) => note.id === row.note_id)) return
+  const list = eventsByNote.get(row.note_id) ?? []
+  list.push(row)
+  eventsByNote.set(row.note_id, list)
+  renderNotes(notesCache)
+}
+
+supabase
+  .channel('email-events')
+  .on(
+    'postgres_changes',
+    { event: 'INSERT', schema: 'public', table: 'email_events' },
+    (payload) => handleIncomingEvent(payload.new)
+  )
+  .subscribe()
+
+// Keep the relative timestamps ("3m ago") fresh while the page stays open.
+setInterval(() => {
+  if (notesCache.length) renderNotes(notesCache)
+}, 60000)
 
 async function postNote(content) {
   const { error } = await supabase.from('notes').insert({ content })

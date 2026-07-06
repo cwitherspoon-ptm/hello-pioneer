@@ -149,6 +149,11 @@ export default async function handler(req, res) {
     to: [to],
     subject: `A note shared from ${APP_NAME}`,
     html: renderEmail({ content: note.content, createdAt: note.created_at, appUrl }),
+    // Tag the outbound email with its note so incoming webhooks can be linked
+    // back even if the `sent` row below is missing. Resend echoes tags on every
+    // webhook payload as `data.tags`. (Tag values allow letters, digits, `_`
+    // and `-`, which a UUID satisfies.)
+    tags: [{ name: 'note_id', value: note.id }],
   })
 
   if (error) {
@@ -157,5 +162,20 @@ export default async function handler(req, res) {
     return res.status(status).json({ error: error.message || 'Failed to send email.' })
   }
 
-  return res.status(200).json({ id: data?.id ?? null })
+  // Record the send so the activity feed shows it immediately and so the webhook
+  // can resolve later events (email.delivered/opened/clicked/bounced) back to
+  // this note by the Resend email id. A failure here must not fail the send —
+  // the email already went out — so we only log it.
+  const messageId = data?.id ?? null
+  if (messageId) {
+    const { error: logError } = await supabase.from('email_events').insert({
+      message_id: messageId,
+      note_id: note.id,
+      recipient: to,
+      event_type: 'sent',
+    })
+    if (logError) console.error('Failed to record sent email_event:', logError.message)
+  }
+
+  return res.status(200).json({ id: messageId })
 }
